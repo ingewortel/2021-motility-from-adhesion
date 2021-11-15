@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, user-scalable=no">
+<title>Migration with ECM adhesion</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-wEmeIV1mKuiNpC+IOBjI7aAzPcEZeedi5yW5f2yOq55WWLwNGmvvx4Um1vskeMj0" crossorigin="anonymous">
+<script src="https://code.jquery.com/jquery-3.4.1.slim.min.js" integrity="sha384-J6qa4849blE2+poT4WnyKhv5vZF5SrPo0iEjwBvKU7imGFAV0wwj1yYfoRSJoZ+n" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="https://pro.fontawesome.com/releases/v5.13.0/css/all.css">
+<link rel="stylesheet" href="./src/example-style.css">
+<script src="./src/sliders.js"></script>
+<script src="./src/artistoo.js"></script>
+<script src="./src/fpsmeter.min.js"></script>
+<script>
+"use strict"
+
+let config = {
+
+	// Grid settings
+	ndim : 2,
+	field_size : [200,200],
+	
+	// CPM parameters and configuration
+	conf : {
+		// Basic CPM parameters
+		torus : [true,true],						// Should the grid have linked borders?
+		seed : 1,							// Seed for random number generation.
+		T : 30,								// CPM temperature
+		
+		// Constraint parameters. 
+		// Mostly these have the format of an array in which each element specifies the
+		// parameter value for one of the cellkinds on the grid.
+		// First value is always cellkind 0 (the background) and is often not used.
+				
+		// Adhesion parameters:
+		J: [[0,35], [35,0]],
+		
+		// VolumeConstraint parameters
+		LAMBDA_V: [0,50],					// VolumeConstraint importance per cellkind
+		V: [0,1000],							// Target volume of each cellkind
+		
+		// PerimeterConstraint parameters
+		LAMBDA_P: [0,4],						// PerimeterConstraint importance per cellkind
+		P : [0,350]						// Target perimeter of each cellkind
+		
+		
+
+	},
+	
+	// Simulation setup and configuration
+	simsettings : {
+	
+		// Cells on the grid
+		NRCELLS : [1],						// Number of cells to seed for all
+											// non-background cellkinds.
+		// Runtime etc
+		BURNIN : 0,
+		
+		// Visualization
+		CANVASCOLOR : "eaecef",
+		CELLCOLOR : ["00FF00"],
+		ACTCOLOR : [true],					// Should pixel activity values be displayed?
+		SHOWBORDERS : [false],				// Should cellborders be displayed?
+		zoom : 2,							// zoom in on canvas with this factor.
+		parentElement: document.getElementById("simContainer"),
+		
+		IMGFRAMERATE : 1,					// If so, do this every <IMGFRAMERATE> MCS.
+		
+		// Output stats etc
+		STATSOUT : { browser: false, node: true }, // Should stats be computed?
+		LOGRATE : 10							// Output stats every <LOGRATE> MCS.
+
+	}
+}
+/*	---------------------------------- */
+let sim, meter
+
+let trackMemory = 10000, trackResolution = 10
+
+let configAdhesion = {
+		// ActivityConstraint parameters
+		LAMBDA_ACT : [0,240],				// ActivityConstraint importance per cellkind
+		MAX_ACT : [0,120],					// Activity memory duration per cellkind
+		ACT_MEAN : "geometric",				// Is neighborhood activity computed as a
+											// "geometric" or "arithmetic" mean?
+		LAMBDA_ADH : [0,20],
+		ps : [0,0.004], // 0.004
+		pd : [0,0.0008],
+		pe : [0,0.0055],
+		b : [0,1],
+		s : [0,0]
+	}
+
+
+class ActiveAdhesionConstraint extends CPM.ActivityConstraint {
+
+	constructor( conf ){
+		super( conf )
+		
+		this.adhesionsByCell = {}
+		this.adhesionLocations = {}
+		
+	}
+	
+	preFactor( cellID ){
+		const b = this.cellParameter( "b", cellID )
+		const s = this.cellParameter( "s", cellID )
+		const n = this.adhesionsByCell[cellID] || 0
+		const fracAdhesion = n / this.C.getVolume( cellID )
+		if( fracAdhesion > s || s == 0 ){
+			return 1
+		}
+		return fracAdhesion * ( b + (1-b)/s )
+	}
+	
+	spawnAdhesion( i ){
+		const cid = this.C.pixti( i )
+		if( !this.adhesionsByCell.hasOwnProperty( cid ) ) this.adhesionsByCell[cid] = 0
+				
+		
+		this.adhesionsByCell[cid] ++
+		this.adhesionLocations[i] = true
+		
+	}
+	
+	deleteAdhesion(i, cid){
+		if( --this.adhesionsByCell[cid] == 0 ){
+			delete this.adhesionsByCell[cid]
+		}
+		delete this.adhesionLocations[i]
+	}
+	
+	adhesionSpawnAttempt(i){
+	
+		// don't do anything if an adhesion already exists
+		if( this.adhesionLocations.hasOwnProperty(i) ) return
+		
+		// check the cell at this pos.
+		const cellID = this.C.pixti( i )
+		const ps = this.cellParameter( "ps", cellID )
+		if( this.C.random() < ps ){
+			//console.log("spawn")
+			this.spawnAdhesion( i )
+		}		
+		
+	}
+	
+	randomNeighbor(i){
+		const Nbh = this.C.grid.neighi( i )
+		return Nbh[Math.floor(this.C.random() * Nbh.length)]
+	}
+	
+	growAdhesions(){
+		for( let i of Object.keys( this.adhesionLocations ) ){
+			const n = this.randomNeighbor(i)
+			const cid = this.C.pixti(i)
+			const pe = this.cellParameter( "pe", cid )
+			// only allow growth into neighbor of the same cell
+			if( this.C.pixti(n) == this.C.pixti(i) ){
+				// spawn with prob pe if no adhesion yet
+				if( !this.adhesionLocations.hasOwnProperty( n ) && this.C.random() < pe ){
+					this.spawnAdhesion(n)
+				}
+			}
+		}
+	}
+	
+	unbindAdhesions(){
+		for( let i of Object.keys( this.adhesionLocations ) ){
+			
+			const Nbh = this.C.grid.neighi(i)			
+			const cid = this.C.pixti(i)
+			const pd = this.cellParameter( "pd", cid )
+			
+			// count fraction of the neighborhood (within the same cell)
+			// that has no adhesions
+			let tot = 0, count = 0
+			for( let n of Nbh ){
+				if( this.C.pixti(n) == cid ){
+					tot++
+					if( !this.adhesionLocations.hasOwnProperty(n) ) count++
+				}
+			}
+			
+			// detach prob is zero if all neighbors are adhered (center cannot detach spontaneously)
+			if( tot > 0 ){
+				// else detach with prob
+				const prob = pd * (count/tot)
+				if( this.C.random() < prob ) this.deleteAdhesion( i, cid )
+			}
+			
+			
+		}
+	}
+	
+	// Extend (not overwrite!) postMCS listener and postsetpixlistener of the Actmodel.
+	postSetpixListener( i, t_old, t ){
+		// After setting a pixel, it gets the MAX_ACT value of its cellkind.
+		this.cellpixelsact[i] = this.cellParameter("MAX_ACT", t)
+		
+		// if this position had an adhesion, this will be deleted
+		if( this.adhesionLocations.hasOwnProperty(i) ){
+			this.deleteAdhesion(i,t_old)
+		}
+	}
+	postMCSListener(){
+		// iterate over cellpixelsage and decrease all activities by one.
+		for( let key in this.cellpixelsact ){
+			
+			// activities that reach zero no longer need to be stored.
+			if( --this.cellpixelsact[ key ] <= 0 ){
+				delete this.cellpixelsact[ key ]
+			}
+			
+			// activities >= 0.75*MaxAct may spawn an adhesion; use activityAt because
+			// we want local activities as in geometric mean.
+			const cid = this.C.pixti(key)
+			if( this.activityAt(key) >= 0.75 * this.cellParameter( "MAX_ACT", cid ) ){
+				this.adhesionSpawnAttempt( key )
+			}
+		}
+		
+		// grow adhesions (eden growth)
+		this.growAdhesions()
+		
+		// stochastic detachment of adhesions
+		this.unbindAdhesions()
+		
+	}
+
+	deltaHAct ( sourcei, targeti, src_type, tgt_type ){
+ 
+		let deltaH = 0, maxact, lambdaact, f
+ 
+		// use parameters for the source cell, unless that is the background.
+		// In that case, use parameters of the target cell.
+		if( src_type != 0 ){
+			maxact = this.cellParameter("MAX_ACT", src_type)
+			lambdaact = this.cellParameter("LAMBDA_ACT", src_type)
+			f = this.preFactor( src_type )
+		} else {
+			// special case: punishment for a copy attempt from background into
+			// an active cell. This effectively means that the active cell retracts,
+			// which is different from one cell pushing into another (active) cell.
+			maxact = this.cellParameter("MAX_ACT", tgt_type)
+			lambdaact = this.cellParameter("LAMBDA_ACT", tgt_type)
+			f = this.preFactor( tgt_type )
+		}
+		if( !maxact || !lambdaact ){
+			return 0
+		}
+ 
+		// compute the Hamiltonian. The activityAt method is a wrapper for either activityAtArith
+		// or activityAtGeom, depending on conf (see constructor).	
+		deltaH += f*lambdaact*(this.activityAt( targeti ) - this.activityAt( sourcei ))/maxact
+		return deltaH
+	}
+	
+	deltaHAdh ( sourcei, targeti, src_type, tgt_type ){
+		if( this.adhesionLocations.hasOwnProperty( targeti ) ) {
+			return this.cellParameter( "LAMBDA_ADH", tgt_type )
+		}
+		return 0
+	}
+	
+	deltaH ( sourcei, targeti, src_type, tgt_type ){
+		const dH = this.deltaHAct( sourcei, targeti, src_type, tgt_type ) + this.deltaHAdh( sourcei, targeti, src_type, tgt_type )
+		//console.log( dH )
+		return dH
+	}
+
+}
+
+
+
+function initialize(){
+	sim = new CPM.Simulation( config, { 
+		drawOnTop : drawOnTop,
+		postMCSListener : postMCSListener	
+	} )
+	sim.C.add( new ActiveAdhesionConstraint( configAdhesion ) )
+	initCanvas()
+	
+	// store centroid history:
+	sim.centroids = []
+
+	meter = new FPSMeter({left:"auto", right:"5px"})
+}
+
+// update the centroid memory
+function postMCSListener(){
+	if( this.time % trackResolution == 0 ){
+		const centr = this.C.getStat( CPM.CentroidsWithTorusCorrection )
+		const cid = Object.keys( centr )[0]
+		sim.centroids.push( centr[cid] )
+		while( sim.centroids.length > (trackMemory/trackResolution) ){
+			sim.centroids.shift()
+		}
+	}
+	
+}
+
+// add a canvas to a specific div on the HTML page; if there already is one, remove and
+// replace it (ie when simulation is reset.)
+function initCanvas(){
+	document.getElementById("simContainer").innerHTML = ""
+	sim.conf.parentElement = document.getElementById("simContainer")
+	sim.addCanvas()
+}
+
+function drawOnTop(){
+
+	// Activity values
+	this.Cim.drawActivityValues(1)
+	
+	// draw adhesions
+	const loc = this.C.getConstraint("ActiveAdhesionConstraint").adhesionLocations
+	const locP = Object.keys( loc ).map(x => this.C.grid.i2p(x)) // index coordinates to array coords.
+	this.Cim.col("000000")
+	this.Cim.ctx.globalAlpha = 0.5
+	for( let p of locP ){
+		this.Cim.pxf( p )
+	}
+	this.Cim.ctx.globalAlpha = 1
+	
+	// draw Tracks
+	const ctx = this.Cim.ctx
+	ctx.globalAlpha = 0.8;
+	ctx.strokeStyle="#0000EE"
+	ctx.beginPath()
+	ctx.lineWidth = 3
+	const trace = sim.centroids
+	if( trace.length >= 2 ){
+		let start = [trace[0][0]*this.Cim.zoom,trace[0][1]*this.Cim.zoom]
+		ctx.moveTo( start[0],start[1] )
+		for( let t = 1; t < trace.length; t++ ){
+			let end = [trace[t][0]*this.Cim.zoom,trace[t][1]*this.Cim.zoom]
+			if( ( Math.abs( start[0]-end[0] ) < Math.floor( this.C.extents[0]/2 ) ) && ( Math.abs( start[1]-end[1] ) < Math.floor( this.C.extents[1]/2 ) ) ){
+				ctx.lineTo( end[0],end[1])
+				ctx.moveTo( end[0],end[1])
+				start = end.slice()
+			} else {
+				ctx.moveTo( end[0],end[1])
+				start = end.slice()
+			}
+			//ctx.lineTo(  )
+		}
+	}
+
+	ctx.stroke()
+	ctx.globalAlpha = 1;	
+	
+}
+
+function logOutputs(){
+	
+	// log tracks once every X MCS
+	if( document.getElementById("recTracks").checked && sim.time % sim.conf.LOGRATE == 0 ){
+	
+		const centroids = sim.C.getStat( CPM.CentroidsWithTorusCorrection )
+		let outString = ""
+		for( let cid of sim.C.cellIDs() ){
+			outString += cid + "\t" + sim.time + "\t" + centroids[cid].join("\t") + "\n"
+		}
+		document.getElementById("tracksOut").innerHTML += outString		
+		
+	}
+	
+	
+}
+
+function computeStep(){
+	sim.step()
+	logOutputs()	
+	meter.tick()
+}
+
+function step(){
+	if( sim.running ){
+		computeStep()
+	}
+	requestAnimationFrame( step )
+}
+
+
+function resetSim(){
+	if( sim.running ) sim.running = false
+	cleanOutputs()
+	initialize()
+	sim.drawCanvas()
+}
+
+</script>
+</head>
+<body onload="initializeTogglers();initialize();step();setSliders();initializeSliders();setPlayPause()">
+ <div class="pageContainer">
+ <h1>Explorable:<br>How adhesion dynamics affect cell motility</h1>
+
+
+ <br>
+ <p style="font-size:140%">The following explorable contains an interactive computational 
+ model of cell migration. You can adjust the model parameters using the sliders under "simulation parameters"
+ to explore how adhesion alters motility dynamics. <br><br></p>
+ 
+ 
+ 
+ <h2>Model summary</h2>
+ 
+ <p>The model is described in detail in the paper, but briefly, it is a
+ <a href="https://artistoo.net/explorables/Explorable-CPM.html">cellular Potts model (CPM)</a> based 
+ on the following rules:</p>
+ <ul>
+ 	<li>When a cell successfully protrudes and gains a new pixel, that pixel gains an
+ 	<b>activity</b> for some time that makes it more likely that this pixel will protrude
+ 	again (<b>positive feedback</b>, activity indicated by red-yellow color below). 
+ 	The duration of the "activity memory" is governed by
+ 	max<sub>act</sub>, the strength of the positive feedback by &lambda;<sub>act</sub>;</li>
+ 	<li>In the protrusive region where local activities are >0.75 x max<sub>act</sub>,
+ 	<b>adhesive sites</b> can spawn with probability p<sub>s</sub>. Such adhesive sites 
+ 	(dark pixels in the simulation below) are
+ 	harder for the cell to detach if it wants to retract, so copy attempts into an
+ 	adhesion get penalty &lambda;<sub>adh</sub>;</li>
+ 	<li>Adhesive patches can also <b>expand and decay</b> independently, at rates governed
+ 	by the parameters p<sub>e</sub> and p<sub>d</sub>, respectively; </li>
+ 	<li>Adhesion to the surface determines how well the cell can translate protrusive
+ 	force at the front into actual motion, because <b>higher adhesion prevents "slipping"</b>
+ 	and staying in place. The fraction of the cell surface occupied by adhesive sites
+ 	therefore modifies &lambda;<sub>act</sub>: the effective &lambda;<sub>act</sub> 
+ 	starts from a baseline fraction <i>b</i> of its value when there are no adhesions
+ 	at all, and reaches its full value only when at least a fraction <i>s</i> of the
+ 	cell surface is adhered to the substrate.</li>
+ </ul>
+ 
+ <h2>Try it yourself</h2>
+ <p>You can use the parameter sliders in the dropdown menu below ("simulation parameters")
+ to explore how changing them affects cell motility. Yellow to red colors indicate 
+ active pixels with protrusive feedback. Dark patches are adhesions, and the blue line
+ shows the trajectory of the cell's center of mass over time. </p>
+ 
+ 
+ 
+ <div class="row sliderContainer">
+		<div class="parmWrapper">
+			<div class="col-12">
+				<p class="containerTitle">Simulation parameters
+					<button type="button" class="btn btn-toggle">
+					<span class="toggle-icon fa fa-chevron-down"></span></button>
+				</p>
+			</div>
+			<div class="row parmBox collapsed">
+	
+				<div class="parmWrapper">
+					<div class="col-12">
+						<p>Act-model:
+							<button type="button" class="btn btn-toggle">
+							<span class="toggle-icon fa fa-chevron-down"></span></button>
+						</p>
+					</div>
+					<div id="actParBox" class="row parmBox collapsed">
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>&lambda;<sub>act</sub></p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="1000" id="lact" oninput="setLambdaAct(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>Scales the strength of the protrusive feedback in the Act-model.</p>
+						</div>
+			
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>max<sub>act</sub></p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="1000" id="mact" oninput="setMaxAct(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>"Memory" of the protrusive feedback.</p>
+						</div>
+			
+					</div>
+				</div>
+				<div class="parmWrapper">
+					<div class="col-12">
+						<p>ECM interaction:
+							<button type="button" class="btn btn-toggle">
+							<span class="toggle-icon fa fa-chevron-down"></span></button>
+						</p>
+					</div>
+					<div id="ecmParBox" class="row parmBox collapsed">
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>&lambda;<sub>adh</sub></p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="500" id="ladh" oninput="setLambdaAdh(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>Penalty for copy attempts into a stable adhesion.</p>
+						</div>
+			
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>p<sub>s</sub>  (x10000)</p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="100" id="ps" oninput="setPs(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>Probability of spawning a new adhesion in regions with local activity > 0.75 x max<sub>act</sub>.</p>
+						</div>
+			
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>p<sub>e</sub>  (x10000)</p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="100" id="pe" oninput="setPe(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>Probability of adhesion expanding into empty neighbor site during Eden growth.</p>
+						</div>
+						
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>p<sub>d</sub>  (x10000)</p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="100" id="pd" oninput="setPd(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>Probability of deleting an existing adhesion, per adhesion-free neighbor site.</p>
+						</div>
+			
+					</div>
+				</div>
+					
+				<div class="parmWrapper">
+					<div class="col-12">
+						<p>Feedback on protrusive strength:
+							<button type="button" class="btn btn-toggle">
+							<span class="toggle-icon fa fa-chevron-down"></span></button>
+						</p>
+					</div>
+					<div id="feedbackParBox" class="row parmBox collapsed">
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>b  (x1000)</p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="1000" id="b" oninput="setB(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>Baseline multiplier for &lambda;<sub>act</sub>.</p>
+						</div>
+		
+						<div class="col-4 col-sm-2 col-md-2">
+							<p>s  (x1000)</p>
+						</div>
+						<div class="col-8 col-sm-4 col-md-4">
+							<div class="range-wrap">
+							  <input type="range" class="range" min="0" max="1000" id="s" oninput="setS(this.value)" >
+							  <output class="bubble"></output>
+							</div>
+						</div>
+						<div class="col-12 col-sm-6 col-md-6 parm-desc">
+							<p>Fractional adhesive area at which (the multiplier for) &lambda;<sub>act</sub> saturates.</p>
+						</div>
+		
+					</div>				
+				</div>		
+			</div>
+		</div>	
+	</div>
+	<br>
+	<div class="row sliderContainer">
+		<div class="col-12">
+			<p ><span class="containerTitle">Simulation controls</span><br>
+			The random seed only takes effect when you reset (&nbsp;<i class="fas fa-redo"></i>&nbsp;). 
+			The same parameters + random seed should yield the exact same output every time.
+			If you tick "record track", then the cell's center of mass will be tracked
+			in the 'outputs' menu below.</p>
+		</div>
+		<div class="row sim-controls">
+			<div class="col-12">
+				<button id="playPause" class="btn"><span id="playIcon" class="fa fa-play"></span></button>
+				Seed:&nbsp;
+				<input id="rseed" type="text" value="1"  style="width:40px" oninput="setSeed(this.value);emptyConf()">&nbsp;&nbsp;
+				&nbsp;&nbsp;&nbsp;
+				<input type="checkbox" id="recTracks" name="recTracks" >
+			  	<label for="recTracks">Record track</label>
+			  	&nbsp;&nbsp;&nbsp;Visualize track:&nbsp;draw every
+			  	<input type="text" id="res"  style="width:40px" oninput="trackResolution = parseInt(this.value)"> MCS, remember 
+				<input type="text" id="mem"  style="width:50px" oninput="trackMemory = parseInt(this.value)"> MCS.
+				<button id="reset" class="btn"><i class="fa fa-redo"></i></button>
+			</div>			
+		</div>
+	</div>
+	
+	<div id="simulationContainer" class="simulationContainer">
+		<div id="simContainer"></div>
+		<div>
+		<p style="font-size:70%">Simulation powered by <a href="https://artistoo.net">Artistoo</a>.</p>
+		</div>
+	</div>
+
+	<div class="row sliderContainer">
+		<div class="parmWrapper">
+			<div class="col-12">
+				<p> <span class="containerTitle">Outputs</span>
+				(Data from the simulation, only when 'record track' is ticked above)
+					<button type="button" class="btn btn-toggle">
+					<span class="toggle-icon fa fa-chevron-down"></span></button>
+				</p>
+			</div>
+			<div class="row parmBox collapsed">
+				<div class="col-12 col-md-6">
+					<p>Cell tracks:</p>
+					<textarea id="tracksOut" class="input" placeholder="Waiting until a simulation starts..."></textarea>
+				</div>
+			</div>
+		</div>
+	</div>
+ 
+ 
+ <p>Suggestions of things to try:</p>
+ <ul>
+ 	<li>When either &lambda;<sub>act</sub> or max<sub>act</sub> is zero, cells should 
+ 	stop moving because there is no "protrusive feedback" or "activity memory".</li>
+ 	<li>When &lambda;<sub>adh</sub> is very high, cells should stop moving because 
+ 	their adhesions are anchored so firmly that they are impossible to detach.</li>
+ 	<li>The number of adhesion patches can be controlled by
+ 	p<sub>s</sub>, p<sub>e</sub>, and p<sub>d</sub>. Higher p<sub>s</sub>/p<sub>e</sub>
+ 	should lead to more adhesive patches because of higher formation rates, and lowering
+ 	p<sub>d</sub> has the same effect by making existing patches more stable.</li>
+ 	<li>p<sub>s</sub> and p<sub>e</sub> also control the spatial distribution of adhesions:
+ 	when only p<sub>s</sub> > 0, patches are smaller and more evenly distributed because
+ 	existing patches cannot expand. By contrast, when p<sub>s</sub> is lower and p<sub>e</sub>
+ 	is very high, patches tend to be larger and can accumulate at the rear of the cell, 
+ 	slowing it down and/or making it "pivot" and turn.</li>
+	<li>When b = 1 and s = 0 (the default), the cell does not slip on the surface
+	regardless the number of adhesions. Fixing b = 0 and s = 1 should make the
+	cell dependent on adhesions for motion: at these values, setting p<sub>s</sub>/p<sub>e</sub>
+	to zero and p<sub>d</sub> to high values will stop motion.</li>
+ </ul>
+ 
+ 
+ <h2>See also</h2>
+ 
+ <p>This simulation implements the model from the paper:</p>
+ 
+ <p style="margin-left:20px">Steijn et al (2021). <a href="https://doi.org/10.1101/2021.06.09.447692">
+ Computational Modelling of Cell Motility Modes Emerging from 
+ Cell-Matrix Adhesion Dynamics</a>. <i>bioRxiv</i>.</p>
+ 
+ <p>This model builds on the Act-CPM, which was first published in:</p>
+ 
+ <p style="margin-left:20px">Niculescu et al (2015). <a href="https://doi.org/10.1371/journal.pcbi.1004280">Crawling 
+  and Gliding: A Computational Model for Shape-Driven Cell Migration</a>. <i>PLoS Computational Biology</i>.</p>
+ 
+ <p>and later further characterised in:</p>
+ 
+ <p style="margin-left:20px">Wortel et al (2021). <a href="https://authors.elsevier.com/a/1dIqh1SPSyQRG">Local 
+ Actin Dynamics Couple Speed and Persistence in a Cellular Potts Model of Cell Migration</a>. <i>Biophysical Journal</i>.</p>
+ 
+ <p>If you are new to the (Act-)CPM, you can explore how they work in the following interactive simulations:</p>
+
+ <p style="margin-left:20px"><a href="https://artistoo.net/explorables/Explorable-CPM.html">Explorable: Introduction to the CPM</a></p>
+ <p style="margin-left:20px"><a href="https://artistoo.net/explorables/Explorable-ActModel.html">Explorable: Act-model</a></p>
+
+ <p>All these interactive simulations were made using <a href="https://artistoo.net">Artistoo</a>, which
+ you can read more about here:</p>
+ 
+  <p style="margin-left:20px">Wortel and Textor (2021). <a href="https://doi.org/10.1371/10.7554/eLife.61288">
+  Artistoo, a Library to Build, Share, and Explore Simulations of Cells and Tissues in the Web Browser</a>. 
+  <i>eLife</i>.</p>
+
+ </div>
+ 
+</body>
+
+<script>
+	
+	setPlayPause = function(){
+		if( sim.running ){
+			$('#playIcon').removeClass('fa-play');$('#playIcon').addClass('fa-pause')
+		} else {
+			$('#playIcon').removeClass('fa-pause');$('#playIcon').addClass('fa-play')
+		}	
+	}
+	
+	$(document).ready(function () {
+			
+		$('#playPause').on('click', function () {
+			sim.toggleRunning()
+			setPlayPause()		
+		});
+		$('#reset').on('click', function () {
+			const currentSeed = document.getElementById("rseed").value
+			config.conf.seed = currentSeed
+			resetSim()
+			setPlayPause()
+		});
+	});
+		
+	
+	setLambdaAct = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.LAMBDA_ACT[1] = parseFloat(value);
+	}
+	setMaxAct = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.MAX_ACT[1] = parseFloat(value);
+	}
+	setLambdaAdh = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.LAMBDA_ADH[1] = parseFloat(value);
+	}
+	setPs = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.ps[1] = parseFloat(value)/10000;
+	}
+	setPe = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.pe[1] =  parseFloat(value)/10000;
+	}
+	setPd = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.pd[1] =  parseFloat(value)/10000;
+	}
+	setB = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.b[1] =  parseFloat(value)/1000;
+	}
+	setS = function( value ){
+		sim.C.getConstraint("ActiveAdhesionConstraint").conf.s[1] =  parseFloat(value)/1000;
+	}
+	
+	setSeed = function(s){
+		config.conf.seed = parseInt(s)
+	}
+	
+	
+	
+	function setSliders(){
+	
+		const conf = sim.C.getConstraint("ActiveAdhesionConstraint").conf
+	
+		document.getElementById("lact").value = conf.LAMBDA_ACT[1]
+		document.getElementById("mact").value = conf.MAX_ACT[1]
+		document.getElementById("ladh").value = conf.LAMBDA_ADH[1]
+	
+		document.getElementById("ps").value = conf.ps[1]*10000
+		document.getElementById("pe").value = conf.pe[1]*10000
+		document.getElementById("pd").value = conf.pd[1]*10000
+		
+		document.getElementById("b").value = conf.b[1]*1000
+		document.getElementById("s").value = conf.s[1]*1000
+		
+		document.getElementById("mem").value = trackMemory
+		document.getElementById("res").value = trackResolution
+
+	}
+	
+	function cleanOutputs(){
+		document.getElementById( "tracksOut" ).innerHTML = "cellID" + "\t" + "timeStep" + "\t" + "x \t y" + "\n"
+	}
+
+</script>
+</html>
