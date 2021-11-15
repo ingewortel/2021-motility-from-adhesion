@@ -1,6 +1,10 @@
 # 2021-motility-from-adhesion
-Interactive simulation accompanying the manuscript "Computational modelling of cell 
-motility modes emerging from cell-matrix adhesion dynamics".
+This repository contains an interactive simulation accompanying the manuscript 
+"Computational modelling of cell 
+motility modes emerging from cell-matrix adhesion dynamics". To access the simulation 
+itself, please visit Github pages of this repository at:
+(https://ingewortel.github.io/2021-motility-from-adhesion/)[https://ingewortel.github.io/2021-motility-from-adhesion/]
+
 
 ## License
 
