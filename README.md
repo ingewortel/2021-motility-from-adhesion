@@ -1,4 +1,7 @@
 # 2021-motility-from-adhesion
+
+[![DOI](https://zenodo.org/badge/428323256.svg)](https://zenodo.org/badge/latestdoi/428323256)
+
 This repository contains an interactive simulation accompanying the manuscript 
 "Computational modelling of cell 
 motility modes emerging from cell-matrix adhesion dynamics". To access the simulation 
